@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PuntoSeguro Market, administración</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap">
+<link rel="stylesheet" href="css/styles.css">
+<style>.f{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:4px 14px}.f input,.f textarea,.f select{width:100%}.r2{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--ln)}.r2 input[type=number]{width:105px}.im{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.im span{position:relative}.im img{width:56px;height:56px;object-fit:cover;border-radius:6px;display:block}.im button{position:absolute;top:-6px;right:-6px;border-radius:99px;border:0;background:var(--red);color:#fff;cursor:pointer;width:20px;height:20px;padding:0;line-height:20px}.nm{flex:1;min-width:180px}</style></head>
+<body><main><h1>Administración de productos</h1><p><a href="/">Ver la tienda</a></p><div id="app"></div></main><div id="ts" role="status"></div>
+<script>
+const $=s=>document.querySelector(s),m=n=>'$'+Number(n).toLocaleString('es-MX');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let K=sessionStorage.getItem('ak')||'',D=null;
+function toast(t){const e=$('#ts');e.textContent=t;e.className='on';clearTimeout(toast.h);toast.h=setTimeout(()=>e.className='',3200)}
+async function api(u,o={}){const h={'x-admin-key':K};if(o.body&&!(o.body instanceof FormData)){h['Content-Type']='application/json';o={...o,body:JSON.stringify(o.body)}}const r=await fetch(u,{...o,headers:h});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'Error del servidor');return d}
+async function load(msg){try{D=await api('/api/admin/catalogo');sessionStorage.setItem('ak',K)}catch(e){D=null;msg=K?e.message:''}draw(msg)}
+function draw(msg){const a=$('#app');
+if(!D){a.innerHTML=`<div class="box" style="max-width:420px"><label for="k">Clave de administrador (ADMIN_KEY de tu archivo .env)</label><input id="k" type="password" style="width:100%"><p><button class="b" data-a="in">Entrar</button></p>${msg?`<p style="color:var(--red)">${esc(msg)}</p>`:''}</div>`;return}
+const padres=D.categorias.filter(c=>!c.padre_id),subs=D.categorias.filter(c=>c.padre_id);
+a.innerHTML=`<div class="box"><h2 style="margin-top:0">Nuevo producto</h2><div class="f">
+<div><label for="nombre">Nombre</label><input id="nombre"></div>
+<div><label for="cat">Categoría (elige o escribe una nueva)</label><input id="cat" list="lc"></div>
+<div><label for="sub">Subcategoría</label><input id="sub" list="ls"></div>
+<div><label for="mar">Marca</label><input id="mar" list="lm"></div>
+<div><label for="pre">Precio</label><input id="pre" type="number" min="0" step="0.01"></div>
+<div><label for="ant">Precio anterior (solo si está en oferta)</label><input id="ant" type="number" min="0" step="0.01"></div>
+<div><label for="stk">Stock</label><input id="stk" type="number" min="0" value="1"></div>
+<div><label for="emo">Emoji (si no hay foto)</label><input id="emo" placeholder="📦"></div>
+<div><label for="col">Color de fondo</label><input id="col" type="color" value="#9db7c4"></div></div>
+<label for="desc">Descripción</label><textarea id="desc" rows="3"></textarea>
+<label><input type="checkbox" id="nue"> Marcar como nuevo</label>
+<label for="fot">Fotos (JPG, PNG o WEBP, hasta 4 MB cada una)</label><input id="fot" type="file" accept="image/*" multiple>
+<p><button class="b" data-a="add">Guardar producto</button></p>
+<datalist id="lc">${padres.map(c=>`<option value="${esc(c.nombre)}">`).join('')}</datalist><datalist id="ls">${subs.map(c=>`<option value="${esc(c.nombre)}">`).join('')}</datalist><datalist id="lm">${D.marcas.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div>
+<h2>Productos (${D.productos.length})</h2>${D.productos.length?D.productos.map(p=>`<div class="r2"><div class="nm"><b>${esc(p.nombre)}</b><div class="mut">${esc(p.sub)}</div></div>
+<div class="im">${p.imgs.map(i=>`<span><img src="${esc(i.ruta)}" alt=""><button data-a="di" data-v="${i.id}" aria-label="Quitar foto">✕</button></span>`).join('')}<label class="b2">Agregar fotos<input type="file" accept="image/*" multiple hidden data-up="${p.id}"></label></div>
+<label>Precio <input id="p${p.id}" type="number" min="0" step="0.01" value="${p.precio}"></label><label>Anterior <input id="a${p.id}" type="number" min="0" step="0.01" value="${p.precio_anterior||''}"></label><label>Stock <input id="s${p.id}" type="number" min="0" value="${p.stock}"></label>
+<button class="b" data-a="sv" data-v="${p.id}">Guardar</button><button class="b2" data-a="dp" data-v="${p.id}">Eliminar</button></div>`).join(''):'<p>Todavía no hay productos. Crea el primero con el formulario de arriba.</p>'}`}
+async function upload(id,files){let fail=0;for(const f of files){const fd=new FormData();fd.append('imagen',f);try{await api('/api/productos/'+id+'/imagenes',{method:'POST',body:fd})}catch(e){fail++}}return fail}
+document.addEventListener('click',async e=>{const t=e.target.closest('[data-a]');if(!t)return;const a=t.dataset.a,v=t.dataset.v,g=i=>$('#'+i).value.trim();
+try{if(a==='in'){K=g('k');await load()}
+else if(a==='add'){const r=await api('/api/admin/productos',{method:'POST',body:{nombre:g('nombre'),descripcion:g('desc'),categoria:g('cat'),subcategoria:g('sub'),marca:g('mar'),precio:g('pre'),precio_anterior:g('ant'),stock:g('stk'),es_nuevo:$('#nue').checked,emoji:g('emo'),color:$('#col').value}});const f=await upload(r.id,$('#fot').files);toast(f?`Producto creado, pero ${f} foto(s) no se subieron (usa JPG, PNG o WEBP de hasta 4 MB)`:'Producto creado');await load()}
+else if(a==='sv'){await api('/api/admin/productos/'+v,{method:'PUT',body:{precio:g('p'+v),precio_anterior:g('a'+v),stock:g('s'+v)}});toast('Cambios guardados');await load()}
+else if(a==='dp'){if(!confirm('¿Eliminar este producto y sus fotos?'))return;await api('/api/admin/productos/'+v,{method:'DELETE'});toast('Producto eliminado');await load()}
+else if(a==='di'){await api('/api/admin/imagenes/'+v,{method:'DELETE'});await load()}}catch(x){toast(x.message)}});
+document.addEventListener('change',async e=>{const id=e.target.dataset.up;if(!id)return;const f=await upload(id,e.target.files);if(f)toast(f+' foto(s) no se subieron (usa JPG, PNG o WEBP de hasta 4 MB)');await load()});
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id==='k'){K=e.target.value.trim();load()}});
+load();
+</script></body></html>
