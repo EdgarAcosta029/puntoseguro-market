@@ -160,10 +160,7 @@ app.post('/api/yo/ine', need, wrap(async (req, res) => {
   const nac = new Date(sig + yy, mm - 1, dd);
   if (nac.getMonth() !== mm - 1 || nac.getDate() !== dd) throw err(400, 'La fecha de nacimiento de la CURP no es válida');
   if ((Date.now() - nac.getTime()) / 31557600000 < 18) throw err(403, 'Debes ser mayor de edad para verificar tu identidad');
-  const [[u]] = await pool.query('SELECT nombre FROM usuarios_ce WHERE id=?', [req.uid]);
-  const toks = t => sinAcento(t).split(/[^A-Z]+/).filter(x => x.length >= 3);
-  const mios = toks(u.nombre), ine = toks(nombre);
-  if (!ine.length || !mios.some(x => ine.includes(x))) throw err(400, 'El nombre de la credencial no coincide con el de tu cuenta. Usa en tu cuenta el mismo nombre que aparece en tu INE');
+  if (nombre.length < 3) throw err(400, 'Escribe el nombre como aparece en tu credencial');   // el nombre de la INE no tiene que coincidir con el de la cuenta
   const hash = require('crypto').createHash('sha256').update(curp + SECRET).digest('hex');
   try { await pool.query("UPDATE usuarios_ce SET ine_estado='verificada', ine_fecha=now(), ine_hash=? WHERE id=?", [hash, req.uid]); }
   catch (e) { if (e.code === '23505') throw err(409, 'Esa credencial ya está asociada a otra cuenta'); throw e; }
@@ -193,8 +190,7 @@ const codigoSeg = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = 
 app.post('/api/pedidos', wrap(async (req, res) => {
   const { items, codigo, nombre, email, pago, modo } = req.body, pg = pago || {};
   const tel = String(req.body.telefono || '').replace(/\D/g, '');
-  if (!req.uid && tel.length !== 10) throw err(400, 'Escribe tu celular a 10 dígitos para que el vendedor pueda comunicarse contigo');
-  if (tel && tel.length !== 10) throw err(400, 'El celular debe tener 10 dígitos');
+  if (tel.length !== 10) throw err(400, 'Escribe tu celular a 10 dígitos para que el vendedor pueda comunicarse contigo');
   if (!Array.isArray(items) || !items.length || !nombre || !valid(email) || !['vendedor', 'chat'].includes(modo))
     throw err(400, 'Datos del pedido incompletos');
   if (!METODOS.includes(pg.metodo)) throw err(400, 'Elige un método de pago');

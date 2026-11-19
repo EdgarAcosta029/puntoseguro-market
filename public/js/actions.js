@@ -6,14 +6,14 @@ function toast(t){const e=$('#ts');e.textContent=t;e.className='on';clearTimeout
 async function place(){const g=i=>$('#'+i).value.trim();if(place.busy)return;
 if(!S.user&&!$('#gu').checked){toast('Marca “Comprar como invitado” o inicia sesión');return}
 if(['fn','fe'].some(i=>!g(i))||!/\S+@\S+\.\S+/.test(g('fe'))){toast('Completa tu nombre y un correo válido');return}
-const tel=g('ft').replace(/\D/g,'');if((!S.user||tel)&&tel.length!==10){toast(S.user?'El celular debe tener 10 dígitos':'Escribe tu celular a 10 dígitos para que el vendedor pueda contactarte');return}
+const tel=g('ft').replace(/\D/g,'');if(tel.length!==10){toast('Escribe tu celular a 10 dígitos para que el vendedor pueda contactarte');return}
 const vs=vendedoresCart(),modo=DM||(vs.some(p=>!p.vp)?'chat':'vendedor');
 if(modo==='chat'&&!S.user){toast('Para acordar el punto por chat inicia sesión');return}
 let pago;try{if(PAY==='tarjeta')pago=validaTarjeta();else if(PAY==='paypal'){const e=g('ppe');if(!/\S+@\S+\.\S+/.test(e))throw new Error('Escribe el correo de tu cuenta de PayPal');if(!await paypalOk(e,tot().t))return;pago={metodo:'paypal',email:e}}else pago={metodo:PAY}}catch(e){toast(e.message);return}
 place.busy=true;const bt=$('#pagarbtn');if(bt){bt.disabled=true;bt.textContent=pago.metodo==='tarjeta'||pago.metodo==='paypal'?'Procesando pago…':'Generando tu referencia…'}
 try{if(pago.metodo==='tarjeta'||pago.metodo==='paypal')await new Promise(r=>setTimeout(r,900));
 const r=await api('/api/pedidos',{method:'POST',body:{items:Object.keys(S.cart).map(k=>({id:pid(k),cant:S.cart[k],variante:vr(k)})),codigo:S.dc?S.dc.codigo:'',nombre:g('fn'),email:g('fe'),telefono:tel,pago,modo}});
-S.last=r.pagos.map(p=>({...p,email:g('fe')}));S.cart={};S.dc=null;DM='';save();await loadP();if(S.user)loadOrders();location.hash='gracias-'+r.ids.join('_');render()}catch(e){toast(e.message);if(bt){bt.disabled=false;bt.textContent='Pagar '+m(tot().t)}}finally{place.busy=false}}
+S.tel=tel;S.last=r.pagos.map(p=>({...p,email:g('fe')}));S.cart={};S.dc=null;DM='';save();await loadP();if(S.user)loadOrders();location.hash='gracias-'+r.ids.join('_');render()}catch(e){toast(e.message);if(bt){bt.disabled=false;bt.textContent='Pagar '+m(tot().t)}}finally{place.busy=false}}
 function act(a,v){switch(a){
 case'add':if(esMio(by(v))){toast('No puedes comprar tu propio producto');return}if(incart(v)>=stk(v)){toast(stk(v)?'Ya tienes todas las piezas disponibles':'Producto agotado');return}S.cart[v]=(S.cart[v]||0)+1;toast('Agregado al carrito');break;
 case'addp':{const p=by(v);if(esMio(p)){toast('No puedes comprar tu propio producto');return}const o={};for(const x of document.querySelectorAll('[data-og]')){if(!x.value){toast('Elige '+x.dataset.og);return}o[x.dataset.og]=x.value}const k=ckey(v,o),n=Math.min(Math.max(1,+$('#qn').value||1),stk(v)-incart(v));if(n<1){toast('Ya tienes todas las piezas disponibles');return}S.cart[k]=(S.cart[k]||0)+n;toast('Agregado al carrito');break}
