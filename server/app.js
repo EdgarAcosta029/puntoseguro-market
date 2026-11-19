@@ -21,7 +21,7 @@ const wrap = f => (req, res) => f(req, res).catch(e => {
 const need = (req, res, next) => req.uid ? next() : res.status(401).json({ error: 'Inicia sesión para continuar' });
 const valid = e => /^\S+@\S+\.\S+$/.test(e || '');
 const token = id => jwt.sign({ id }, SECRET, { expiresIn: '7d' });
-const userOut = u => ({ id: u.id, n: u.nombre, e: u.email, direccion: u.direccion || '', punto: u.punto_entrega || '',
+const userOut = u => ({ id: u.id, n: u.nombre, e: u.email, direccion: u.direccion || '', punto: u.punto_entrega || '', puntoId: u.punto_entrega_id || null, ine: u.ine_estado === 'verificada',
   pref: { email: u.pref_email, sms: u.pref_sms, promo: u.pref_promo } });
 
 app.use((req, res, next) => {          // identifica al usuario si manda token (si no, es invitado)
@@ -35,7 +35,7 @@ app.get('/api/productos', wrap(async (req, res) => {
     SELECT p.id, p.nombre AS n, p.emoji AS e, c.nombre AS s, pc.nombre AS c, m.nombre AS b,
            p.precio AS p, COALESCE(p.precio_anterior,0) AS o,
            COALESCE((SELECT ROUND(AVG(calificacion),1) FROM resenas_ce WHERE producto_id=p.id),0) AS r,
-           p.descripcion AS d, u.nombre AS v, u.punto_entrega AS vp, p.vendedor_id AS vid, p.popularidad AS pop, p.es_nuevo AS nw, p.color AS col, p.stock,
+           p.descripcion AS d, u.nombre AS v, u.punto_entrega AS vp, p.vendedor_id AS vid, (u.ine_estado='verificada') AS vv, p.condicion AS con, p.opciones AS ops, p.popularidad AS pop, p.es_nuevo AS nw, p.color AS col, p.stock,
            (SELECT string_agg(ruta, '|' ORDER BY orden, id) FROM imagenes_producto_ce WHERE producto_id=p.id) AS imgs
     FROM productos_ce p JOIN categorias_ce c ON c.id=p.categoria_id JOIN categorias_ce pc ON pc.id=c.padre_id
     JOIN marcas_ce m ON m.id=p.marca_id LEFT JOIN usuarios_ce u ON u.id=p.vendedor_id ORDER BY p.id`);
@@ -87,7 +87,15 @@ app.get('/api/yo', need, wrap(async (req, res) => {
 app.put('/api/yo', need, wrap(async (req, res) => {
   const { direccion, pref, punto } = req.body;
   if (typeof direccion === 'string') await pool.query('UPDATE usuarios_ce SET direccion=? WHERE id=?', [direccion, req.uid]);
-  if (typeof punto === 'string') await pool.query('UPDATE usuarios_ce SET punto_entrega=? WHERE id=?', [punto.trim().slice(0, 300) || null, req.uid]);
+  if (typeof punto === 'string') {
+    let pid = null, txt = punto.trim().slice(0, 300);
+    if (req.body.punto_id) {                       // eligió uno de los Puntos Seguros del mapa
+      const [[ps]] = await pool.query('SELECT id, nombre, direccion FROM puntos_seguros_ce WHERE id=? AND activo=1', [+req.body.punto_id]);
+      if (!ps) throw err(400, 'Ese Punto Seguro ya no está disponible');
+      pid = ps.id; txt = (ps.nombre + ', ' + ps.direccion).slice(0, 300);
+    }
+    await pool.query('UPDATE usuarios_ce SET punto_entrega=?, punto_entrega_id=? WHERE id=?', [txt || null, txt ? pid : null, req.uid]);
+  }
   if (pref) await pool.query('UPDATE usuarios_ce SET pref_email=?, pref_sms=?, pref_promo=? WHERE id=?',
     [+!!pref.email, +!!pref.sms, +!!pref.promo, req.uid]);
   res.json({ ok: true });
@@ -113,6 +121,53 @@ app.put('/api/deseos', need, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- Puntos Seguros (mapa) ----------
+app.get('/api/puntos', wrap(async (req, res) => {
+  const [r] = await pool.query('SELECT id, nombre, direccion, horario, descripcion, lat, lng, verificado FROM puntos_seguros_ce WHERE activo=1 ORDER BY nombre');
+  res.json(r);
+}));
+
+// ---------- Direcciones y lugares guardados ----------
+app.get('/api/direcciones', need, wrap(async (req, res) => {
+  const [r] = await pool.query('SELECT id, etiqueta, texto FROM direcciones_ce WHERE usuario_id=? ORDER BY id', [req.uid]);
+  res.json(r);
+}));
+app.post('/api/direcciones', need, wrap(async (req, res) => {
+  const et = String(req.body.etiqueta || '').trim().slice(0, 40), tx = String(req.body.texto || '').trim().slice(0, 300);
+  if (!et || !tx) throw err(400, 'Escribe un nombre (Casa, Trabajo...) y la dirección');
+  const [[n]] = await pool.query('SELECT COUNT(*) AS n FROM direcciones_ce WHERE usuario_id=?', [req.uid]);
+  if (n.n >= 10) throw err(400, 'Puedes guardar hasta 10 direcciones');
+  const [r] = await pool.query('INSERT INTO direcciones_ce (usuario_id, etiqueta, texto) VALUES (?,?,?) RETURNING id', [req.uid, et, tx]);
+  res.json({ id: r.insertId });
+}));
+app.delete('/api/direcciones/:id', need, wrap(async (req, res) => {
+  await pool.query('DELETE FROM direcciones_ce WHERE id=? AND usuario_id=?', [req.params.id, req.uid]);
+  res.json({ ok: true });
+}));
+
+// ---------- Verificación de identidad con INE ----------
+// El OCR se hace en el navegador y la FOTO NUNCA llega aquí. Solo se recibe el texto leído (y corregido por la persona):
+// se validan nombre y CURP y se guarda una huella (hash) para que una misma credencial no sirva en dos cuentas.
+// Es una demostración: una verificación real usaría un proveedor certificado (validación contra el INE y prueba de vida).
+const CURP = /^[A-Z]{4}\d{6}[HM][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[A-Z0-9]\d$/;
+const sinAcento = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+app.post('/api/yo/ine', need, wrap(async (req, res) => {
+  const curp = sinAcento(req.body.curp).replace(/\s/g, ''), nombre = sinAcento(req.body.nombre).trim();
+  if (!CURP.test(curp)) throw err(400, 'La CURP no tiene un formato válido. Revísala o toma otra foto');
+  const yy = +curp.slice(4, 6), mm = +curp.slice(6, 8), dd = +curp.slice(8, 10), sig = /\d/.test(curp[16]) ? 1900 : 2000;
+  const nac = new Date(sig + yy, mm - 1, dd);
+  if (nac.getMonth() !== mm - 1 || nac.getDate() !== dd) throw err(400, 'La fecha de nacimiento de la CURP no es válida');
+  if ((Date.now() - nac.getTime()) / 31557600000 < 18) throw err(403, 'Debes ser mayor de edad para verificar tu identidad');
+  const [[u]] = await pool.query('SELECT nombre FROM usuarios_ce WHERE id=?', [req.uid]);
+  const toks = t => sinAcento(t).split(/[^A-Z]+/).filter(x => x.length >= 3);
+  const mios = toks(u.nombre), ine = toks(nombre);
+  if (!ine.length || !mios.some(x => ine.includes(x))) throw err(400, 'El nombre de la credencial no coincide con el de tu cuenta. Usa en tu cuenta el mismo nombre que aparece en tu INE');
+  const hash = require('crypto').createHash('sha256').update(curp + SECRET).digest('hex');
+  try { await pool.query("UPDATE usuarios_ce SET ine_estado='verificada', ine_fecha=now(), ine_hash=? WHERE id=?", [hash, req.uid]); }
+  catch (e) { if (e.code === '23505') throw err(409, 'Esa credencial ya está asociada a otra cuenta'); throw e; }
+  res.json({ ok: true });
+}));
+
 // ---------- Descuentos y pedidos ----------
 app.post('/api/descuento', wrap(async (req, res) => {
   const [[c]] = await pool.query('SELECT codigo,tipo,valor FROM codigos_descuento_ce WHERE codigo=? AND activo=1', [(req.body.codigo || '').trim().toUpperCase()]);
@@ -120,62 +175,120 @@ app.post('/api/descuento', wrap(async (req, res) => {
   res.json(c);
 }));
 
+// ---------- Pagos y custodia de fondos (SIMULADOS) ----------
+// Tarjeta y PayPal: el dinero queda "retenido" al instante. SPEI y efectivo: se genera una referencia y queda "pendiente"
+// hasta que se "paga" (aquí con un botón de simulación). Al confirmar la entrega los fondos pasan a "liberado" (al vendedor).
+// Si se cancela, vuelven al comprador ("reembolsado"). La CLABE y las referencias son de demostración: no existen en ningún banco.
+const clabeDemo = id => { const b = '000000' + String(id).padStart(11, '0'), w = [3, 7, 1]; let t = 0; for (let k = 0; k < 17; k++) t += (b[k] * w[k % 3]) % 10; return b + ((10 - t % 10) % 10); };
+const refSpei = id => String(id).padStart(7, '0').slice(-7);
+const refEfectivo = id => '97' + String(id).padStart(10, '0') + String((id * 7919) % 100).padStart(2, '0');
+const instr = x => x.pago === 'spei' ? { metodo: 'spei', clabe: x.pago_ref, referencia: refSpei(x.id), concepto: 'PSM-' + x.id, beneficiario: 'PuntoSeguro Market (demostración)', vence: x.pago_vence }
+  : x.pago === 'oxxo' ? { metodo: 'oxxo', referencia: x.pago_ref, vence: x.pago_vence } : null;
+const METODOS = ['tarjeta', 'spei', 'oxxo', 'paypal'];
+
 // Un pedido por vendedor. Entrega: 'vendedor' = en el punto que fijó el vendedor, 'chat' = se acuerda por chat con el vendedor.
 app.post('/api/pedidos', wrap(async (req, res) => {
-  const { items, codigo, nombre, email, pago, modo } = req.body;
+  const { items, codigo, nombre, email, pago, modo } = req.body, pg = pago || {};
   if (!Array.isArray(items) || !items.length || !nombre || !valid(email) || !['vendedor', 'chat'].includes(modo))
     throw err(400, 'Datos del pedido incompletos');
+  if (!METODOS.includes(pg.metodo)) throw err(400, 'Elige un método de pago');
+  let detalle;
+  if (pg.metodo === 'tarjeta') {
+    if (!/^\d{4}$/.test(pg.ultimos4 || '') || !['Visa', 'Mastercard', 'American Express'].includes(pg.marca)) throw err(400, 'Revisa los datos de tu tarjeta');
+    detalle = pg.marca + ' •••• ' + pg.ultimos4;
+  } else if (pg.metodo === 'paypal') {
+    if (!valid(pg.email)) throw err(400, 'Escribe el correo de tu cuenta de PayPal');
+    detalle = 'PayPal: ' + pg.email;
+  } else detalle = pg.metodo === 'spei' ? 'Transferencia SPEI' : 'Efectivo en tienda de conveniencia';
+  const retenido = pg.metodo === 'tarjeta' || pg.metodo === 'paypal';
   if (modo === 'chat' && !req.uid) throw err(401, 'Para acordar el punto por chat necesitas iniciar sesión');
   const cn = await pool.getConnection();
   try {
     await cn.beginTransaction();
+    const prods = new Map();                       // precios, stock y opciones siempre se leen de la base
+    for (const it of items) if (!prods.has(+it.id)) {
+      const [[p]] = await cn.query('SELECT p.id,p.nombre,p.precio,p.stock,p.opciones,p.vendedor_id,u.email AS vemail,u.punto_entrega AS punto,u.punto_entrega_id AS punto_id FROM productos_ce p LEFT JOIN usuarios_ce u ON u.id=p.vendedor_id WHERE p.id=? FOR UPDATE OF p', [+it.id]);
+      if (!p) throw err(400, 'Producto no válido');
+      prods.set(p.id, { ...p, usado: 0 });
+    }
     const grupos = new Map();                      // vendedor_id (o 0 = plataforma) -> líneas
-    for (const it of items) {                      // precios y stock siempre se leen de la base
-      const [[p]] = await cn.query('SELECT p.id,p.nombre,p.precio,p.stock,p.vendedor_id,u.email AS vemail,u.punto_entrega AS punto FROM productos_ce p LEFT JOIN usuarios_ce u ON u.id=p.vendedor_id WHERE p.id=? FOR UPDATE OF p', [it.id]);
-      const q = Math.floor(+it.cant);
-      if (!p || !(q >= 1)) throw err(400, 'Producto no válido');
+    for (const it of items) {
+      const p = prods.get(+it.id), q = Math.floor(+it.cant);
+      if (!(q >= 1)) throw err(400, 'Producto no válido');
       if (p.vendedor_id && (p.vendedor_id === req.uid || (p.vemail || '').toLowerCase() === String(email).trim().toLowerCase()))
         throw err(403, 'No puedes comprar tu propio producto');
-      if (p.stock < q) throw err(409, `Sin stock suficiente de ${p.nombre}`);
+      p.usado += q;
+      if (p.stock < p.usado) throw err(409, `Sin stock suficiente de ${p.nombre}`);
+      const partes = [], ops = p.opciones || {};
+      for (const g of Object.keys(ops)) {          // la variante elegida debe existir en las opciones del producto
+        const v = it.variante && it.variante[g];
+        if (!ops[g].includes(v)) throw err(400, `Elige ${g} para ${p.nombre}`);
+        partes.push(g + ': ' + v);
+      }
       const k = p.vendedor_id || 0;
-      if (!grupos.has(k)) grupos.set(k, { punto: p.punto, lines: [] });
-      grupos.get(k).lines.push([p, q]);
+      if (!grupos.has(k)) grupos.set(k, { punto: p.punto, punto_id: p.punto_id, lines: [] });
+      grupos.get(k).lines.push([p, q, partes.join(' · ') || null]);
     }
     let c = null;
     if (codigo) [[c]] = await cn.query('SELECT * FROM codigos_descuento_ce WHERE codigo=? AND activo=1 AND tipo=\'porcentaje\'', [codigo]);
-    const ids = []; let totalGral = 0;
+    const pagos = []; let totalGral = 0;
     for (const [vid, g] of grupos) {
       if (vid && modo === 'vendedor' && !g.punto) throw err(400, 'Uno de los vendedores aún no definió su punto de entrega. Elige acordarlo por chat.');
       const sub = g.lines.reduce((t, [p, q]) => t + p.precio * q, 0);
       const d = c ? Math.round(sub * c.valor / 100) : 0, total = sub - d;
       const m = vid ? modo : 'tienda';
       const punto = m === 'vendedor' ? g.punto : m === 'tienda' ? 'Punto Seguro de PuntoSeguro Market (te lo confirmamos por correo)' : null;
-      const [r] = await cn.query('INSERT INTO pedidos_ce (usuario_id,nombre,email,vendedor_id,entrega_modo,punto_acordado,estado,pago,subtotal,descuento,total) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
-        [req.uid, nombre, email, vid || null, m, punto, punto ? 1 : 0, pago || 'tarjeta', sub, d, total]);
-      for (const [p, q] of g.lines) {
-        await cn.query('INSERT INTO pedido_items_ce (pedido_id,producto_id,nombre,precio,cantidad) VALUES (?,?,?,?,?)', [r.insertId, p.id, p.nombre, p.precio, q]);
+      const [r] = await cn.query('INSERT INTO pedidos_ce (usuario_id,nombre,email,vendedor_id,entrega_modo,punto_acordado,punto_id,estado,pago,pago_estado,pago_detalle,subtotal,descuento,total) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
+        [req.uid, nombre, email, vid || null, m, punto, m === 'vendedor' ? g.punto_id : null, punto ? 1 : 0, pg.metodo, retenido ? 'retenido' : 'pendiente', detalle, sub, d, total]);
+      for (const [p, q, vr] of g.lines) {
+        await cn.query('INSERT INTO pedido_items_ce (pedido_id,producto_id,nombre,precio,cantidad,variante) VALUES (?,?,?,?,?,?)', [r.insertId, p.id, p.nombre, p.precio, q, vr]);
         await cn.query('UPDATE productos_ce SET stock=stock-?, popularidad=popularidad+? WHERE id=?', [q, q, p.id]);
       }
-      ids.push(r.insertId); totalGral += total;
+      let ins = null;
+      if (!retenido) {
+        const ref = pg.metodo === 'spei' ? clabeDemo(r.insertId) : refEfectivo(r.insertId);
+        await cn.query("UPDATE pedidos_ce SET pago_ref=?, pago_vence=now() + (?::int * interval '1 hour') WHERE id=?", [ref, pg.metodo === 'spei' ? 72 : 48, r.insertId]);
+        const [[x]] = await cn.query('SELECT id, pago, pago_ref, pago_vence FROM pedidos_ce WHERE id=?', [r.insertId]);
+        ins = instr(x);
+      }
+      pagos.push({ id: r.insertId, total, metodo: pg.metodo, estado: retenido ? 'retenido' : 'pendiente', detalle, ins });
+      totalGral += total;
     }
     await cn.commit();
-    res.json({ id: ids[0], ids, total: totalGral });
+    res.json({ id: pagos[0].id, ids: pagos.map(x => x.id), total: totalGral, pagos });
   } catch (e) { await cn.rollback(); throw e; } finally { cn.release(); }
 }));
 
-const vista = (x, yo) => ({ id: x.id, d: x.d, t: x.t, st: x.st, modo: x.entrega_modo, punto: x.punto_acordado || '',
-  inv: !x.usuario_id, mail: x.email, prop: x.punto_propuesto || '', mio: !!x.punto_propuesto && x.propuesto_por === yo, otro: x.otro || '' });
-async function conItems(o, yo) {
+const SEL_PED = `pe.*, to_char(pe.creado AT TIME ZONE 'America/Mexico_City','DD/MM/YYYY') AS d, pe.total AS t, pe.estado AS st,
+  ps.lat AS plat, ps.lng AS plng, pp.lat AS prlat, pp.lng AS prlng, v.nombre AS nom_v, v.ine_estado AS ine_v, c.nombre AS nom_c, c.ine_estado AS ine_c`;
+const JOIN_PED = `FROM pedidos_ce pe LEFT JOIN usuarios_ce v ON v.id=pe.vendedor_id LEFT JOIN usuarios_ce c ON c.id=pe.usuario_id
+  LEFT JOIN puntos_seguros_ce ps ON ps.id=pe.punto_id LEFT JOIN puntos_seguros_ce pp ON pp.id=pe.punto_propuesto_id`;
+const vista = (x, yo, rol) => ({ id: x.id, d: x.d, t: x.t, st: x.st, modo: x.entrega_modo, punto: x.punto_acordado || '', plat: x.plat, plng: x.plng,
+  inv: !x.usuario_id, mail: x.email, prop: x.punto_propuesto || '', prlat: x.prlat, prlng: x.prlng, mio: !!x.punto_propuesto && x.propuesto_por === yo,
+  otro: rol === 'c' ? (x.nom_v || '') : x.nombre, comprador: x.nombre,
+  ine_yo: (rol === 'c' ? x.ine_c : x.ine_v) === 'verificada', ine_otro: (rol === 'c' ? x.ine_v : x.ine_c) === 'verificada',
+  pago: x.pago, pe: x.pago_estado, pd: x.pago_detalle || '', ins: instr(x) });
+async function conItems(o, yo, rol) {
   for (const x of o) {
-    const [it] = await pool.query('SELECT nombre, cantidad FROM pedido_items_ce WHERE pedido_id=?', [x.id]);
-    x.items = it.map(i => i.nombre + ' ×' + i.cantidad);
+    const [it] = await pool.query('SELECT nombre, cantidad, variante FROM pedido_items_ce WHERE pedido_id=? ORDER BY id', [x.id]);
+    x.items = it.map(i => i.nombre + (i.variante ? ' (' + i.variante + ')' : '') + ' ×' + i.cantidad);
   }
-  return o.map(x => ({ ...vista(x, yo), items: x.items, comprador: x.nombre }));
+  return o.map(x => ({ ...vista(x, yo, rol), items: x.items }));
 }
 app.get('/api/pedidos', need, wrap(async (req, res) => {
-  const [o] = await pool.query(`SELECT pe.*, to_char(pe.creado AT TIME ZONE 'America/Mexico_City','DD/MM/YYYY') AS d, pe.total AS t, pe.estado AS st, v.nombre AS otro
-    FROM pedidos_ce pe LEFT JOIN usuarios_ce v ON v.id=pe.vendedor_id WHERE pe.usuario_id=? ORDER BY pe.id`, [req.uid]);
-  res.json((await conItems(o, req.uid)).map(x => ({ ...x, id: 'PED-' + x.id, n: x.id })));
+  const [o] = await pool.query(`SELECT ${SEL_PED} ${JOIN_PED} WHERE pe.usuario_id=? ORDER BY pe.id`, [req.uid]);
+  res.json((await conItems(o, req.uid, 'c')).map(x => ({ ...x, id: 'PED-' + x.id, n: x.id })));
+}));
+
+// Pagar una referencia SPEI / efectivo (simulado). Lo hace el comprador con cuenta o, si compró como invitado, con su correo.
+app.post('/api/pedidos/:id/simular-pago', wrap(async (req, res) => {
+  const [[p]] = await pool.query('SELECT * FROM pedidos_ce WHERE id=?', [req.params.id]);
+  const mio = p && ((req.uid && p.usuario_id === req.uid) || (!p.usuario_id && String(req.body.email || '').trim().toLowerCase() === p.email.toLowerCase()));
+  if (!mio) throw err(404, 'Pedido no encontrado');
+  if (p.pago_estado !== 'pendiente') throw err(400, 'Este pedido no tiene un pago pendiente');
+  if (p.pago_vence && new Date(p.pago_vence) < new Date()) throw err(410, 'La referencia de pago venció');
+  await pool.query("UPDATE pedidos_ce SET pago_estado='retenido' WHERE id=?", [p.id]);
+  res.json({ ok: true });
 }));
 
 // Chat y entrega: solo participan el comprador y el vendedor del pedido
@@ -199,9 +312,14 @@ app.post('/api/pedidos/:id/mensajes', need, part, wrap(async (req, res) => {
 }));
 app.post('/api/pedidos/:id/punto', need, part, wrap(async (req, res) => {          // proponer un punto intermedio
   if (req.ped.entrega_modo !== 'chat' || req.ped.estado !== 0) throw err(400, 'Este pedido ya tiene punto de entrega');
-  const t = String(req.body.punto || '').trim().slice(0, 300);
+  let t = String(req.body.punto || '').trim().slice(0, 300), pid = null;
+  if (req.body.punto_id) {                         // propuso uno de los Puntos Seguros del mapa
+    const [[ps]] = await pool.query('SELECT id, nombre, direccion FROM puntos_seguros_ce WHERE id=? AND activo=1', [+req.body.punto_id]);
+    if (!ps) throw err(400, 'Ese Punto Seguro ya no está disponible');
+    pid = ps.id; t = (ps.nombre + ', ' + ps.direccion).slice(0, 300);
+  }
   if (!t) throw err(400, 'Escribe el lugar propuesto');
-  await pool.query('UPDATE pedidos_ce SET punto_propuesto=?, propuesto_por=? WHERE id=?', [t, req.uid, req.params.id]);
+  await pool.query('UPDATE pedidos_ce SET punto_propuesto=?, punto_propuesto_id=?, propuesto_por=? WHERE id=?', [t, pid, req.uid, req.params.id]);
   await pool.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [req.params.id, req.uid, '📍 Propongo vernos en: ' + t]);
   res.json({ ok: true });
 }));
@@ -209,14 +327,35 @@ app.post('/api/pedidos/:id/aceptar', need, part, wrap(async (req, res) => {     
   const p = req.ped;
   if (p.entrega_modo !== 'chat' || p.estado !== 0 || !p.punto_propuesto) throw err(400, 'No hay un punto por aceptar');
   if (p.propuesto_por === req.uid) throw err(403, 'Debe aceptarlo la otra persona');
-  await pool.query('UPDATE pedidos_ce SET punto_acordado=punto_propuesto, punto_propuesto=NULL, propuesto_por=NULL, estado=1 WHERE id=?', [p.id]);
+  await pool.query('UPDATE pedidos_ce SET punto_acordado=punto_propuesto, punto_id=punto_propuesto_id, punto_propuesto=NULL, punto_propuesto_id=NULL, propuesto_por=NULL, estado=1 WHERE id=?', [p.id]);
   await pool.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [p.id, req.uid, '✅ Acepto el punto: ' + p.punto_propuesto]);
   res.json({ ok: true });
 }));
-app.post('/api/pedidos/:id/recibido', need, part, wrap(async (req, res) => {       // el comprador confirma que recibió e inspeccionó
+app.post('/api/pedidos/:id/recibido', need, part, wrap(async (req, res) => {       // el comprador confirma que recibió e inspeccionó: se liberan los fondos
+  const p = req.ped;
   if (!req.soyComprador) throw err(403, 'Solo el comprador confirma la entrega');
-  if (req.ped.estado !== 1) throw err(400, 'Primero debe acordarse el punto de entrega');
-  await pool.query('UPDATE pedidos_ce SET estado=2 WHERE id=?', [req.ped.id]);
+  if (p.estado !== 1) throw err(400, 'Primero debe acordarse el punto de entrega');
+  if (p.pago_estado !== 'retenido') throw err(409, 'El pago aún no está en custodia. Paga tu referencia antes de recibir el producto');
+  if (process.env.REQUIRE_INE === '1') {           // opcional: exigir identidad verificada a ambas partes
+    const [r] = await pool.query("SELECT COUNT(*) AS n FROM usuarios_ce WHERE id IN (?,?) AND ine_estado='verificada'", [p.usuario_id, p.vendedor_id || 0]);
+    if (r[0].n < (p.vendedor_id ? 2 : 1)) throw err(409, 'Comprador y vendedor deben verificar su identidad con INE antes de entregar');
+  }
+  await pool.query("UPDATE pedidos_ce SET estado=2, pago_estado='liberado' WHERE id=?", [p.id]);
+  res.json({ ok: true });
+}));
+app.post('/api/pedidos/:id/cancelar', need, part, wrap(async (req, res) => {       // cancela antes de entregar: el dinero vuelve al comprador y el stock se repone
+  const p = req.ped;
+  if (p.estado > 1) throw err(400, 'Este pedido ya no se puede cancelar');
+  const cn = await pool.getConnection();
+  try {
+    await cn.beginTransaction();
+    const [it] = await cn.query('SELECT producto_id, cantidad FROM pedido_items_ce WHERE pedido_id=?', [p.id]);
+    for (const i of it) await cn.query('UPDATE productos_ce SET stock=stock+? WHERE id=?', [i.cantidad, i.producto_id]);
+    await cn.query('UPDATE pedidos_ce SET estado=3, pago_estado=?, punto_propuesto=NULL, punto_propuesto_id=NULL WHERE id=?', [p.pago_estado === 'retenido' ? 'reembolsado' : 'cancelado', p.id]);
+    if (p.entrega_modo !== 'tienda' && p.usuario_id)
+      await cn.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [p.id, req.uid, '❌ Pedido cancelado' + (p.pago_estado === 'retenido' ? '. Los fondos se devuelven al comprador.' : '.')]);
+    await cn.commit();
+  } catch (e) { await cn.rollback(); throw e; } finally { cn.release(); }
   res.json({ ok: true });
 }));
 
@@ -232,6 +371,37 @@ app.post('/api/newsletter', wrap(async (req, res) => {
   await pool.query('INSERT INTO suscriptores_newsletter_ce (email) VALUES (?) ON CONFLICT (email) DO NOTHING', [req.body.email.trim().toLowerCase()]);
   res.json({ ok: true });
 }));
+
+// ---------- Mensajes de contacto, suscriptores y Puntos Seguros (administración) ----------
+const adm = (req, res, next) => (ADMIN_KEY && req.headers['x-admin-key'] === ADMIN_KEY) ? next() : res.status(403).json({ error: 'Clave de administrador incorrecta' });
+app.get('/api/admin/mensajes', adm, wrap(async (req, res) => {
+  const [m] = await pool.query("SELECT id, nombre, email, mensaje, leido, to_char(creado AT TIME ZONE 'America/Mexico_City','DD/MM/YYYY HH24:MI') AS f FROM mensajes_contacto_ce ORDER BY id DESC");
+  const [s] = await pool.query("SELECT email, to_char(creado AT TIME ZONE 'America/Mexico_City','DD/MM/YYYY') AS f FROM suscriptores_newsletter_ce ORDER BY id DESC");
+  res.json({ mensajes: m, suscriptores: s });
+}));
+app.put('/api/admin/mensajes/:id', adm, wrap(async (req, res) => {
+  await pool.query('UPDATE mensajes_contacto_ce SET leido=? WHERE id=?', [+!!req.body.leido, req.params.id]);
+  res.json({ ok: true });
+}));
+app.delete('/api/admin/mensajes/:id', adm, wrap(async (req, res) => {
+  await pool.query('DELETE FROM mensajes_contacto_ce WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
+}));
+const datosPunto = b => {
+  const nombre = String(b.nombre || '').trim().slice(0, 120), dir = String(b.direccion || '').trim().slice(0, 250), lat = +b.lat, lng = +b.lng;
+  if (!nombre || !dir || !(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180) || b.lat === '' || b.lng === '') throw err(400, 'Completa nombre, dirección y ubicación en el mapa');
+  return [nombre, dir, String(b.horario || '').trim().slice(0, 120) || null, String(b.descripcion || '').trim() || null, lat, lng, +!!b.verificado, +(b.activo !== false && b.activo !== 0)];
+};
+app.get('/api/admin/puntos', adm, wrap(async (req, res) => { const [r] = await pool.query('SELECT * FROM puntos_seguros_ce ORDER BY id'); res.json(r); }));
+app.post('/api/admin/puntos', adm, wrap(async (req, res) => {
+  const [r] = await pool.query('INSERT INTO puntos_seguros_ce (nombre,direccion,horario,descripcion,lat,lng,verificado,activo) VALUES (?,?,?,?,?,?,?,?) RETURNING id', datosPunto(req.body));
+  res.json({ id: r.insertId });
+}));
+app.put('/api/admin/puntos/:id', adm, wrap(async (req, res) => {
+  await pool.query('UPDATE puntos_seguros_ce SET nombre=?, direccion=?, horario=?, descripcion=?, lat=?, lng=?, verificado=?, activo=? WHERE id=?', [...datosPunto(req.body), req.params.id]);
+  res.json({ ok: true });
+}));
+app.delete('/api/admin/puntos/:id', adm, wrap(async (req, res) => { await pool.query('DELETE FROM puntos_seguros_ce WHERE id=?', [req.params.id]); res.json({ ok: true }); }));
 
 // ---------- Imágenes de producto (archivo en Supabase Storage, URL en la base) ----------
 const upload = multer({
@@ -283,8 +453,14 @@ async function crearProducto(b, vendedor) {          // la usan el panel de admi
   const sub = await idPorNombre('categorias', t(b.subcategoria), cat);
   const marca = await idPorNombre('marcas', t(b.marca));
   const color = /^#[0-9a-f]{6}$/i.test(t(b.color)) ? t(b.color) : '#9DB7C4';
-  const [r] = await pool.query('INSERT INTO productos_ce (nombre,descripcion,emoji,color,categoria_id,marca_id,precio,precio_anterior,stock,es_nuevo,vendedor_id) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
-    [t(b.nombre), t(b.descripcion), t(b.emoji) || '📦', color, sub, marca, precio, ant, stock, +!!b.es_nuevo, vendedor || null]);
+  const condicion = ['nuevo', 'seminuevo', 'usado'].includes(b.condicion) ? b.condicion : 'usado';
+  const opciones = {};                                // [{nombre:'Color', valores:'Negro, Azul'}] -> {"Color":["Negro","Azul"]}
+  for (const g of Array.isArray(b.opciones) ? b.opciones.slice(0, 3) : []) {
+    const n = t(g.nombre).slice(0, 30), v = [...new Set(t(g.valores).split(',').map(x => x.trim().slice(0, 30)).filter(Boolean))].slice(0, 12);
+    if (n && v.length) opciones[n] = v;
+  }
+  const [r] = await pool.query('INSERT INTO productos_ce (nombre,descripcion,emoji,color,categoria_id,marca_id,precio,precio_anterior,stock,es_nuevo,vendedor_id,condicion,opciones) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb) RETURNING id',
+    [t(b.nombre), t(b.descripcion), t(b.emoji) || '📦', color, sub, marca, precio, ant, stock, +!!b.es_nuevo, vendedor || null, condicion, JSON.stringify(opciones)]);
   return r.insertId;
 }
 app.post('/api/admin/productos', adminOnly, wrap(async (req, res) => res.json({ id: await crearProducto(req.body, null) })));
@@ -345,9 +521,8 @@ app.delete('/api/vender/imagenes/:id', need, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 app.get('/api/vender/ventas', need, wrap(async (req, res) => {
-  const [o] = await pool.query(`SELECT pe.*, to_char(pe.creado AT TIME ZONE 'America/Mexico_City','DD/MM/YYYY') AS d, pe.total AS t, pe.estado AS st, pe.nombre AS otro
-    FROM pedidos_ce pe WHERE pe.vendedor_id=? ORDER BY pe.id DESC`, [req.uid]);
-  res.json((await conItems(o, req.uid)).map(x => ({ ...x, n: x.id })));
+  const [o] = await pool.query(`SELECT ${SEL_PED} ${JOIN_PED} WHERE pe.vendedor_id=? ORDER BY pe.id DESC`, [req.uid]);
+  res.json((await conItems(o, req.uid, 'v')).map(x => ({ ...x, n: x.id })));
 }));
 app.use((e, req, res, next) => {                 // errores que no pasaron por wrap(): subida de archivos, JSON inválido, etc.
   if (e && e.name === 'MulterError') return res.status(400).json({ error: SUBE });

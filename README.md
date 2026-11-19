@@ -53,6 +53,20 @@ Si cambias una variable de entorno, haz **Redeploy** para que se aplique.
 - `tu-url.vercel.app/admin.html` pide la `ADMIN_KEY`.
 - Compra con otra cuenta, acuerda el punto por chat y confirma la entrega.
 
+## Funciones de la fase 2 (qué hacen y qué es simulado)
+
+| Función | Cómo funciona | ¿Real o simulado? |
+|---|---|---|
+| Mapa de Puntos Seguros | Menú **Puntos Seguros**: mapa OpenStreetMap + Leaflet (sin API key) con lista, horario y botón “Cómo llegar”. Los vendedores eligen su punto del mapa y en el chat se propone uno de la lista. El administrador los da de alta en `/admin.html` > Puntos Seguros (busca la dirección o hace clic en el mapa). | Real |
+| Pagos | Tarjeta (Luhn, marca, vigencia, CVV; solo se guarda marca y últimos 4), SPEI (CLABE + referencia + concepto + vencimiento 72 h), efectivo (referencia con código de barras, 48 h) y PayPal (correo + ventana de aprobación). | **Simulado**: no se cobra nada. Tarjeta de prueba 4242 4242 4242 4242; rechazo con 4000 0000 0000 0002 |
+| Custodia de fondos (escrow) | Estados: pendiente → en custodia → liberado (cuando el comprador confirma) o reembolsado (si se cancela). El vendedor ve “Mis cobros”. | **Simulado** (solo cambia un estado en la base de datos) |
+| Verificación de INE | Mi cuenta > Verificar identidad: foto de la INE, OCR con Tesseract.js **en el navegador** (la foto no se sube), validación de CURP, mayoría de edad y coincidencia de nombre; guarda solo un hash de la CURP. Insignia “Verificado” y estado por pedido. | Demostración: no prueba que la credencial sea auténtica. Con `REQUIRE_INE=1` se exige a ambas partes para confirmar la entrega |
+| Variantes y filtros | Al publicar se definen opciones (Color, Talla…) y el estado (nuevo/seminuevo/usado). El catálogo filtra por estado, opciones y vendedores verificados. | Real |
+| Direcciones | Mi cuenta > Mis datos: hasta 10 lugares guardados, usables como punto de entrega. | Real |
+| Mensajes de contacto | `/admin.html` > Mensajes: leer, marcar leído, eliminar y ver suscriptores. | Real |
+
+**Si ya tenías la tienda desplegada:** ejecuta `database/actualizacion_fase2_supabase.sql` en el SQL Editor de Supabase (es seguro repetirlo), opcionalmente `database/puntos_seguros_ejemplo.sql` (5 puntos con coordenadas aproximadas que debes corregir en el admin) y sube el código con `git add . && git commit -m "Fase 2" && git push`.
+
 ## Límites y cuidados
 - Las fotos pueden pesar hasta **4 MB** (Vercel no acepta peticiones más grandes).
 - En el plan gratis de Supabase el proyecto se **pausa tras una semana sin uso**: se reactiva desde su panel.
