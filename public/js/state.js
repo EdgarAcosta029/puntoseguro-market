@@ -1,7 +1,7 @@
 /* Estado de la tienda (carrito, usuario, pedidos), filtros y funciones auxiliares (totales, tarjetas de producto) */
 let S={last:null,token:'',cart:{},wish:[],user:null,orders:[],saved:null,rev:{},pref:{email:1,sms:0,promo:1},addr:'',disc:'',cp:'',news:0};
 try{Object.assign(S,JSON.parse(localStorage.getItem('cn')||'{}'))}catch(e){}
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let RV={};const save=()=>{try{localStorage.setItem('cn',JSON.stringify(S))}catch(e){}};
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let RV={},RP={};const save=()=>{try{localStorage.setItem('cn',JSON.stringify(S))}catch(e){}};
 let DM='',OM={},Q={cat:'',sub:'',max:null,br:[],of:false,sort:'pop',vw:'grid',q:'',con:[],opt:{},vv:false},T='pedidos',PAY='tarjeta',G=0,H=0,HP=false,CH=[['bt','Hola, soy el asistente de PuntoSeguro Market. Pregúntame por la entrega, el pago, devoluciones, cómo vender o tu pedido, o toca una de las preguntas rápidas.']];
 const $=s=>document.querySelector(s),m=n=>'$'+n.toLocaleString('es-MX'),by=id=>P.find(p=>p.id==id);
 const stk=id=>(by(id)||{}).stock||0;const pstep=x=>x>=5000?250:x>=1000?50:10,pmax=()=>{const x=Math.max(0,...P.map(p=>p.p)),s=pstep(x);return Math.max(s,Math.ceil(x/s)*s)};const esMio=p=>!!(S.user&&p&&p.vid&&p.vid===S.user.id);const cnt=()=>Object.values(S.cart).reduce((a,b)=>a+b,0);

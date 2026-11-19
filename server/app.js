@@ -50,12 +50,32 @@ app.get('/api/productos/:id/resenas', wrap(async (req, res) => {
   res.json(r.map(x => [x.autor, x.calificacion, x.comentario]));
 }));
 
-app.post('/api/productos/:id/resenas', need, wrap(async (req, res) => {   // solo con sesión, una reseña por producto, nunca del propio producto
+// Solo puede reseñar quien ya recibió (pedido entregado) una compra de ese vendedor
+async function compro(uid, p) {
+  const [[c]] = p.vendedor_id
+    ? await pool.query('SELECT 1 AS ok FROM pedidos_ce WHERE usuario_id=? AND vendedor_id=? AND estado=2 AND pago_estado<>\'reembolsado\' LIMIT 1', [uid, p.vendedor_id])
+    : await pool.query('SELECT 1 AS ok FROM pedidos_ce pe JOIN pedido_items_ce i ON i.pedido_id=pe.id WHERE pe.usuario_id=? AND i.producto_id=? AND pe.estado=2 AND pe.pago_estado<>\'reembolsado\' LIMIT 1', [uid, p.id]);
+  return !!c;
+}
+const MOTIVO_NO_COMPRO = 'Solo pueden reseñar quienes compraron al vendedor y ya recibieron su pedido';
+
+app.get('/api/productos/:id/puede-resenar', need, wrap(async (req, res) => {
+  const [[p]] = await pool.query('SELECT id, vendedor_id FROM productos_ce WHERE id=?', [req.params.id]);
+  if (!p) throw err(404, 'Producto no encontrado');
+  if (p.vendedor_id === req.uid) return res.json({ ok: false, m: 'No puedes reseñar tu propio producto' });
+  const [[ya]] = await pool.query('SELECT id FROM resenas_ce WHERE producto_id=? AND usuario_id=?', [p.id, req.uid]);
+  if (ya) return res.json({ ok: false, m: 'Ya escribiste una reseña de este producto' });
+  if (!(await compro(req.uid, p))) return res.json({ ok: false, m: MOTIVO_NO_COMPRO + '.' });
+  res.json({ ok: true });
+}));
+
+app.post('/api/productos/:id/resenas', need, wrap(async (req, res) => {   // solo con sesión y con compra entregada al vendedor; una reseña por producto, nunca del propio
   const { calificacion, comentario } = req.body, cal = +calificacion;
   if (!(cal >= 1 && cal <= 5) || !(comentario || '').trim()) throw err(400, 'Escribe una calificación y un comentario');
   const [[p]] = await pool.query('SELECT id, vendedor_id FROM productos_ce WHERE id=?', [req.params.id]);
   if (!p) throw err(404, 'Producto no encontrado');
   if (p.vendedor_id === req.uid) throw err(403, 'No puedes reseñar tu propio producto');
+  if (!(await compro(req.uid, p))) throw err(403, MOTIVO_NO_COMPRO);
   const [[ya]] = await pool.query('SELECT id FROM resenas_ce WHERE producto_id=? AND usuario_id=?', [p.id, req.uid]);
   if (ya) throw err(409, 'Ya escribiste una reseña de este producto');
   const [[u]] = await pool.query('SELECT nombre FROM usuarios_ce WHERE id=?', [req.uid]);
