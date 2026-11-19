@@ -6,12 +6,13 @@ function toast(t){const e=$('#ts');e.textContent=t;e.className='on';clearTimeout
 async function place(){const g=i=>$('#'+i).value.trim();if(place.busy)return;
 if(!S.user&&!$('#gu').checked){toast('Marca “Comprar como invitado” o inicia sesión');return}
 if(['fn','fe'].some(i=>!g(i))||!/\S+@\S+\.\S+/.test(g('fe'))){toast('Completa tu nombre y un correo válido');return}
+const tel=g('ft').replace(/\D/g,'');if((!S.user||tel)&&tel.length!==10){toast(S.user?'El celular debe tener 10 dígitos':'Escribe tu celular a 10 dígitos para que el vendedor pueda contactarte');return}
 const vs=vendedoresCart(),modo=DM||(vs.some(p=>!p.vp)?'chat':'vendedor');
 if(modo==='chat'&&!S.user){toast('Para acordar el punto por chat inicia sesión');return}
 let pago;try{if(PAY==='tarjeta')pago=validaTarjeta();else if(PAY==='paypal'){const e=g('ppe');if(!/\S+@\S+\.\S+/.test(e))throw new Error('Escribe el correo de tu cuenta de PayPal');if(!await paypalOk(e,tot().t))return;pago={metodo:'paypal',email:e}}else pago={metodo:PAY}}catch(e){toast(e.message);return}
 place.busy=true;const bt=$('#pagarbtn');if(bt){bt.disabled=true;bt.textContent=pago.metodo==='tarjeta'||pago.metodo==='paypal'?'Procesando pago…':'Generando tu referencia…'}
 try{if(pago.metodo==='tarjeta'||pago.metodo==='paypal')await new Promise(r=>setTimeout(r,900));
-const r=await api('/api/pedidos',{method:'POST',body:{items:Object.keys(S.cart).map(k=>({id:pid(k),cant:S.cart[k],variante:vr(k)})),codigo:S.dc?S.dc.codigo:'',nombre:g('fn'),email:g('fe'),pago,modo}});
+const r=await api('/api/pedidos',{method:'POST',body:{items:Object.keys(S.cart).map(k=>({id:pid(k),cant:S.cart[k],variante:vr(k)})),codigo:S.dc?S.dc.codigo:'',nombre:g('fn'),email:g('fe'),telefono:tel,pago,modo}});
 S.last=r.pagos.map(p=>({...p,email:g('fe')}));S.cart={};S.dc=null;DM='';save();await loadP();if(S.user)loadOrders();location.hash='gracias-'+r.ids.join('_');render()}catch(e){toast(e.message);if(bt){bt.disabled=false;bt.textContent='Pagar '+m(tot().t)}}finally{place.busy=false}}
 function act(a,v){switch(a){
 case'add':if(esMio(by(v))){toast('No puedes comprar tu propio producto');return}if(incart(v)>=stk(v)){toast(stk(v)?'Ya tienes todas las piezas disponibles':'Producto agotado');return}S.cart[v]=(S.cart[v]||0)+1;toast('Agregado al carrito');break;
@@ -30,12 +31,15 @@ case'out':S.user=null;S.token='';S.orders=[];S.saved=null;DIR=[];break;
 case'psend':{const i=$('#mi-'+v),t=i.value.trim();if(!t)return;api('/api/pedidos/'+v+'/mensajes',{method:'POST',body:{texto:t}}).then(()=>{i.value='';return loadChats()}).catch(x=>toast(x.message));return}
 case'pprop':{const x=pick('ps-'+v,'pp-'+v);if(!x.punto&&!x.punto_id){toast('Elige un Punto Seguro o escribe el lugar que propones');return}api('/api/pedidos/'+v+'/punto',{method:'POST',body:x}).then(()=>T==='vender'?loadSeller():loadOrders()).then(loadChats).catch(e=>toast(e.message));return}
 case'pacc':api('/api/pedidos/'+v+'/aceptar',{method:'POST'}).then(()=>{toast('Punto de entrega acordado');return T==='vender'?loadSeller():loadOrders()}).catch(x=>toast(x.message));return;
-case'prec':if(!confirm('¿Ya tienes el producto y lo revisaste? Al confirmar se liberan al vendedor los fondos que estaban en custodia.'))return;api('/api/pedidos/'+v+'/recibido',{method:'POST'}).then(()=>{toast('Entrega confirmada. Fondos liberados al vendedor (simulación)');return loadOrders()}).catch(x=>toast(x.message));return;
+case'prec':if(!confirm('¿Ya tienes el producto y lo revisaste? Confirma solo si ya lo recibiste.'))return;api('/api/pedidos/'+v+'/recibido',{method:'POST'}).then(async r=>{toast(r.completo?'Entrega completada. Fondos liberados al vendedor (simulación)':'Listo. Falta que el vendedor confirme la entrega');await loadOrders();await loadP();render()}).catch(x=>toast(x.message));return;
+case'pent':if(!confirm('¿Ya entregaste el producto al comprador?'))return;api('/api/pedidos/'+v+'/entregado',{method:'POST'}).then(async r=>{toast(r.completo?'Entrega completada. Se liberaron tus fondos (simulación)':'Listo. Falta que el comprador confirme que recibió');await loadSeller();await loadP();render()}).catch(x=>toast(x.message));return;
 case'vpunto':{const x=pick('vps','vpu');api('/api/yo',{method:'PUT',body:x.punto_id?{punto:'x',punto_id:x.punto_id}:{punto:x.punto}}).then(async()=>{const u=await api('/api/yo');S.punto=u.punto||'';S.puntoId=u.puntoId||null;save();toast(S.punto?'Punto de entrega guardado':'Punto de entrega quitado');return loadP()}).then(render).catch(e=>toast(e.message));return}
 case'spay':{const o=(S.last||[]).find(x=>x.id==v);api('/api/pedidos/'+v+'/simular-pago',{method:'POST',body:{email:o?o.email:(S.user&&S.user.e)}}).then(()=>{if(o)o.estado='retenido';save();toast('Pago recibido: tus fondos quedaron en custodia');return S.user?loadOrders():0}).then(render).catch(e=>toast(e.message));return}
 case'pcan':if(!confirm('¿Cancelar este pedido? Si tu pago ya estaba en custodia, se devuelve al comprador.'))return;api('/api/pedidos/'+v+'/cancelar',{method:'POST'}).then(async()=>{toast('Pedido cancelado');await(T==='vender'?loadSeller():loadOrders());await loadP();render()}).catch(e=>toast(e.message));return;
 case'copy':{const f=()=>toast('Copiado');(navigator.clipboard?navigator.clipboard.writeText(v).then(f):Promise.reject()).catch(()=>{const t=document.createElement('textarea');t.value=v;document.body.appendChild(t);t.select();try{document.execCommand('copy');f()}catch(e){}t.remove()});return}
 case'pmap':{const mk=MK[v];if(mk&&MAP){MAP.setView(mk.getLatLng(),16);mk.openPopup()}return}
+case'segq':case'segpay':case'segrec':case'segcan':seg(a);return;
+case'segir':{const[i,c]=v.split('|');SG={ped:'PED-'+i,cod:c,r:null,err:''};location.hash='ayuda';seg('segq');return}
 case'ineocr':ineOCR();return;case'inesave':ineSave();return;case'diradd':dirAdd();return;case'dirdel':dirDel(v);return;
 case'addr':S.addr=$('#ad').value;api('/api/yo',{method:'PUT',body:{direccion:S.addr}}).then(()=>toast('Datos guardados')).catch(x=>toast(x.message));break;
 case'news':{const e=$('#ne').value.trim();if(!/\S+@\S+/.test(e)){toast('Escribe un correo válido');return}api('/api/newsletter',{method:'POST',body:{email:e}}).then(()=>{S.news=1;save();render()}).catch(x=>toast(x.message));return}

@@ -109,6 +109,10 @@ CREATE TABLE pedidos_ce (
   estado SMALLINT NOT NULL DEFAULT 0,               -- 0 pedido confirmado, 1 punto de entrega acordado, 2 entregado, 3 cancelado
   pago_estado VARCHAR(12) NOT NULL DEFAULT 'retenido',   -- pendiente | retenido | liberado | reembolsado | cancelado
   pago_detalle VARCHAR(80) NULL,
+  telefono VARCHAR(20) NULL,                        -- celular del comprador (obligatorio si compra como invitado)
+  codigo_seguimiento VARCHAR(12) NULL,              -- código para que un invitado consulte y confirme su pedido
+  comprador_confirmo SMALLINT NOT NULL DEFAULT 0,   -- el comprador confirmó que recibió
+  vendedor_confirmo SMALLINT NOT NULL DEFAULT 0,    -- el vendedor confirmó que entregó
   pago_ref VARCHAR(40) NULL,                        -- CLABE (SPEI) o referencia (efectivo)
   pago_vence TIMESTAMPTZ NULL,
   punto_id INT NULL REFERENCES puntos_seguros_ce(id) ON DELETE SET NULL,
@@ -178,3 +182,4 @@ BEGIN
     ON CONFLICT (id) DO NOTHING;
   END IF;
 END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS pedidos_codigo_uq ON pedidos_ce (codigo_seguimiento) WHERE codigo_seguimiento IS NOT NULL;

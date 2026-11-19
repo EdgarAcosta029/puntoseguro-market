@@ -65,7 +65,11 @@ Si cambias una variable de entorno, haz **Redeploy** para que se aplique.
 | Direcciones | Mi cuenta > Mis datos: hasta 10 lugares guardados, usables como punto de entrega. | Real |
 | Mensajes de contacto | `/admin.html` > Mensajes: leer, marcar leído, eliminar y ver suscriptores. | Real |
 
-**Si ya tenías la tienda desplegada:** ejecuta `database/actualizacion_fase2_supabase.sql` en el SQL Editor de Supabase (es seguro repetirlo), opcionalmente `database/puntos_seguros_ejemplo.sql` (5 puntos con coordenadas aproximadas que debes corregir en el admin) y sube el código con `git add . && git commit -m "Fase 2" && git push`.
+**Entrega confirmada por ambas partes:** al comprar, el producto sigue visible como “Reservado” (nadie más puede comprarlo). Cuando el comprador confirma “recibí” y el vendedor confirma “entregué”, se liberan los fondos (simulado) y, si ya no queda stock, el producto sale del catálogo. Si el pedido se cancela antes, vuelve a estar disponible. Requiere `database/actualizacion_fase3_supabase.sql`.
+
+**Compras como invitado:** piden celular (10 dígitos, lo ve el vendedor) y generan un código de seguimiento por pedido. En Ayuda > Seguimiento de pedido, con el número de pedido y el código, el invitado consulta el estado, paga su referencia, confirma que recibió o cancela antes de la entrega. Su confirmación cuenta como la del comprador. Requiere `database/actualizacion_fase4_supabase.sql`.
+
+**Si ya tenías la tienda desplegada:** ejecuta `database/actualizacion_fase2_supabase.sql` en el SQL Editor de Supabase (es seguro repetirlo), opcionalmente `database/puntos_seguros_ejemplo.sql` (5 puntos con coordenadas aproximadas que debes corregir en el admin) y sube el código con `git add . && git commit -m "Fase 2" && git push`. Para la fase 3 ejecuta también `database/actualizacion_fase3_supabase.sql` y para la fase 4 `database/actualizacion_fase4_supabase.sql`.
 
 ## Límites y cuidados
 - Las fotos pueden pesar hasta **4 MB** (Vercel no acepta peticiones más grandes).

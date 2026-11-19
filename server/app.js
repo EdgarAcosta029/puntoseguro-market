@@ -38,7 +38,9 @@ app.get('/api/productos', wrap(async (req, res) => {
            p.descripcion AS d, u.nombre AS v, u.punto_entrega AS vp, p.vendedor_id AS vid, (u.ine_estado='verificada') AS vv, p.condicion AS con, p.opciones AS ops, p.popularidad AS pop, p.es_nuevo AS nw, p.color AS col, p.stock,
            (SELECT string_agg(ruta, '|' ORDER BY orden, id) FROM imagenes_producto_ce WHERE producto_id=p.id) AS imgs
     FROM productos_ce p JOIN categorias_ce c ON c.id=p.categoria_id JOIN categorias_ce pc ON pc.id=c.padre_id
-    JOIN marcas_ce m ON m.id=p.marca_id LEFT JOIN usuarios_ce u ON u.id=p.vendedor_id ORDER BY p.id`);
+    JOIN marcas_ce m ON m.id=p.marca_id LEFT JOIN usuarios_ce u ON u.id=p.vendedor_id
+    WHERE p.stock > 0 OR EXISTS (SELECT 1 FROM pedido_items_ce i JOIN pedidos_ce pe ON pe.id=i.pedido_id WHERE i.producto_id=p.id AND pe.estado IN (0,1))
+    ORDER BY p.id`);   // se oculta solo cuando ya no queda stock y no hay pedidos abiertos (todos confirmados por ambas partes)
   rows.forEach(r => { r.imgs = r.imgs ? r.imgs.split('|') : []; r.img = r.imgs[0] || null; });
   res.json(rows);
 }));
@@ -185,10 +187,14 @@ const refEfectivo = id => '97' + String(id).padStart(10, '0') + String((id * 791
 const instr = x => x.pago === 'spei' ? { metodo: 'spei', clabe: x.pago_ref, referencia: refSpei(x.id), concepto: 'PSM-' + x.id, beneficiario: 'PuntoSeguro Market (demostración)', vence: x.pago_vence }
   : x.pago === 'oxxo' ? { metodo: 'oxxo', referencia: x.pago_ref, vence: x.pago_vence } : null;
 const METODOS = ['tarjeta', 'spei', 'oxxo', 'paypal'];
+const codigoSeg = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = ''; for (let i = 0; i < 8; i++) c += a[require('crypto').randomInt(a.length)]; return c; };
 
 // Un pedido por vendedor. Entrega: 'vendedor' = en el punto que fijó el vendedor, 'chat' = se acuerda por chat con el vendedor.
 app.post('/api/pedidos', wrap(async (req, res) => {
   const { items, codigo, nombre, email, pago, modo } = req.body, pg = pago || {};
+  const tel = String(req.body.telefono || '').replace(/\D/g, '');
+  if (!req.uid && tel.length !== 10) throw err(400, 'Escribe tu celular a 10 dígitos para que el vendedor pueda comunicarse contigo');
+  if (tel && tel.length !== 10) throw err(400, 'El celular debe tener 10 dígitos');
   if (!Array.isArray(items) || !items.length || !nombre || !valid(email) || !['vendedor', 'chat'].includes(modo))
     throw err(400, 'Datos del pedido incompletos');
   if (!METODOS.includes(pg.metodo)) throw err(400, 'Elige un método de pago');
@@ -236,10 +242,10 @@ app.post('/api/pedidos', wrap(async (req, res) => {
       if (vid && modo === 'vendedor' && !g.punto) throw err(400, 'Uno de los vendedores aún no definió su punto de entrega. Elige acordarlo por chat.');
       const sub = g.lines.reduce((t, [p, q]) => t + p.precio * q, 0);
       const d = c ? Math.round(sub * c.valor / 100) : 0, total = sub - d;
-      const m = vid ? modo : 'tienda';
+      const m = vid ? modo : 'tienda', cod = req.uid ? null : codigoSeg();   // los invitados reciben un código para dar seguimiento
       const punto = m === 'vendedor' ? g.punto : m === 'tienda' ? 'Punto Seguro de PuntoSeguro Market (te lo confirmamos por correo)' : null;
-      const [r] = await cn.query('INSERT INTO pedidos_ce (usuario_id,nombre,email,vendedor_id,entrega_modo,punto_acordado,punto_id,estado,pago,pago_estado,pago_detalle,subtotal,descuento,total) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
-        [req.uid, nombre, email, vid || null, m, punto, m === 'vendedor' ? g.punto_id : null, punto ? 1 : 0, pg.metodo, retenido ? 'retenido' : 'pendiente', detalle, sub, d, total]);
+      const [r] = await cn.query('INSERT INTO pedidos_ce (usuario_id,nombre,email,telefono,codigo_seguimiento,vendedor_id,entrega_modo,punto_acordado,punto_id,estado,pago,pago_estado,pago_detalle,subtotal,descuento,total) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
+        [req.uid, nombre, email, tel || null, cod, vid || null, m, punto, m === 'vendedor' ? g.punto_id : null, punto ? 1 : 0, pg.metodo, retenido ? 'retenido' : 'pendiente', detalle, sub, d, total]);
       for (const [p, q, vr] of g.lines) {
         await cn.query('INSERT INTO pedido_items_ce (pedido_id,producto_id,nombre,precio,cantidad,variante) VALUES (?,?,?,?,?,?)', [r.insertId, p.id, p.nombre, p.precio, q, vr]);
         await cn.query('UPDATE productos_ce SET stock=stock-?, popularidad=popularidad+? WHERE id=?', [q, q, p.id]);
@@ -251,7 +257,7 @@ app.post('/api/pedidos', wrap(async (req, res) => {
         const [[x]] = await cn.query('SELECT id, pago, pago_ref, pago_vence FROM pedidos_ce WHERE id=?', [r.insertId]);
         ins = instr(x);
       }
-      pagos.push({ id: r.insertId, total, metodo: pg.metodo, estado: retenido ? 'retenido' : 'pendiente', detalle, ins });
+      pagos.push({ id: r.insertId, codigo: cod, total, metodo: pg.metodo, estado: retenido ? 'retenido' : 'pendiente', detalle, ins });
       totalGral += total;
     }
     await cn.commit();
@@ -264,10 +270,10 @@ const SEL_PED = `pe.*, to_char(pe.creado AT TIME ZONE 'America/Mexico_City','DD/
 const JOIN_PED = `FROM pedidos_ce pe LEFT JOIN usuarios_ce v ON v.id=pe.vendedor_id LEFT JOIN usuarios_ce c ON c.id=pe.usuario_id
   LEFT JOIN puntos_seguros_ce ps ON ps.id=pe.punto_id LEFT JOIN puntos_seguros_ce pp ON pp.id=pe.punto_propuesto_id`;
 const vista = (x, yo, rol) => ({ id: x.id, d: x.d, t: x.t, st: x.st, modo: x.entrega_modo, punto: x.punto_acordado || '', plat: x.plat, plng: x.plng,
-  inv: !x.usuario_id, mail: x.email, prop: x.punto_propuesto || '', prlat: x.prlat, prlng: x.prlng, mio: !!x.punto_propuesto && x.propuesto_por === yo,
+  inv: !x.usuario_id, mail: x.email, tel: rol === 'v' ? (x.telefono || '') : '', prop: x.punto_propuesto || '', prlat: x.prlat, prlng: x.prlng, mio: !!x.punto_propuesto && x.propuesto_por === yo,
   otro: rol === 'c' ? (x.nom_v || '') : x.nombre, comprador: x.nombre,
   ine_yo: (rol === 'c' ? x.ine_c : x.ine_v) === 'verificada', ine_otro: (rol === 'c' ? x.ine_v : x.ine_c) === 'verificada',
-  pago: x.pago, pe: x.pago_estado, pd: x.pago_detalle || '', ins: instr(x) });
+  cc: x.comprador_confirmo, vc: x.vendedor_confirmo, pago: x.pago, pe: x.pago_estado, pd: x.pago_detalle || '', ins: instr(x) });
 async function conItems(o, yo, rol) {
   for (const x of o) {
     const [it] = await pool.query('SELECT nombre, cantidad, variante FROM pedido_items_ce WHERE pedido_id=? ORDER BY id', [x.id]);
@@ -331,33 +337,77 @@ app.post('/api/pedidos/:id/aceptar', need, part, wrap(async (req, res) => {     
   await pool.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [p.id, req.uid, '✅ Acepto el punto: ' + p.punto_propuesto]);
   res.json({ ok: true });
 }));
-app.post('/api/pedidos/:id/recibido', need, part, wrap(async (req, res) => {       // el comprador confirma que recibió e inspeccionó: se liberan los fondos
+// La entrega se completa cuando CONFIRMAN las dos partes: el comprador ("recibí e inspeccioné") y el vendedor ("entregué").
+// Al completarse se liberan los fondos en custodia y el producto sale del catálogo si ya no tiene stock. (En compras a la tienda solo confirma el comprador.)
+async function confirmar(req, res, esComprador) {
   const p = req.ped;
-  if (!req.soyComprador) throw err(403, 'Solo el comprador confirma la entrega');
+  if (esComprador !== !!req.soyComprador) throw err(403, esComprador ? 'Solo el comprador confirma que recibió' : 'Solo el vendedor confirma que entregó');
   if (p.estado !== 1) throw err(400, 'Primero debe acordarse el punto de entrega');
-  if (p.pago_estado !== 'retenido') throw err(409, 'El pago aún no está en custodia. Paga tu referencia antes de recibir el producto');
+  if (p.pago_estado !== 'retenido') throw err(409, 'El pago aún no está en custodia. Debe pagarse la referencia antes de entregar');
+  const col = esComprador ? 'comprador_confirmo' : 'vendedor_confirmo';
+  if (p[col]) throw err(400, 'Ya confirmaste esta entrega');
   if (process.env.REQUIRE_INE === '1') {           // opcional: exigir identidad verificada a ambas partes
     const [r] = await pool.query("SELECT COUNT(*) AS n FROM usuarios_ce WHERE id IN (?,?) AND ine_estado='verificada'", [p.usuario_id, p.vendedor_id || 0]);
-    if (r[0].n < (p.vendedor_id ? 2 : 1)) throw err(409, 'Comprador y vendedor deben verificar su identidad con INE antes de entregar');
+    if (r[0].n < (p.usuario_id ? 1 : 0) + (p.vendedor_id ? 1 : 0)) throw err(409, 'Comprador y vendedor deben verificar su identidad con INE antes de entregar');
   }
-  await pool.query("UPDATE pedidos_ce SET estado=2, pago_estado='liberado' WHERE id=?", [p.id]);
-  res.json({ ok: true });
-}));
-app.post('/api/pedidos/:id/cancelar', need, part, wrap(async (req, res) => {       // cancela antes de entregar: el dinero vuelve al comprador y el stock se repone
-  const p = req.ped;
-  if (p.estado > 1) throw err(400, 'Este pedido ya no se puede cancelar');
+  await pool.query(`UPDATE pedidos_ce SET ${col}=1 WHERE id=?`, [p.id]);
+  const [[x]] = await pool.query('SELECT comprador_confirmo AS cc, vendedor_confirmo AS vc FROM pedidos_ce WHERE id=?', [p.id]);
+  const completo = x.cc === 1 && (x.vc === 1 || !p.vendedor_id);
+  if (completo) await pool.query("UPDATE pedidos_ce SET estado=2, pago_estado='liberado' WHERE id=?", [p.id]);
+  if (p.entrega_modo !== 'tienda' && p.usuario_id)
+    await pool.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [p.id, req.uid, esComprador ? '✅ Confirmo que recibí el producto' : '✅ Confirmo que entregué el producto']);
+  res.json({ ok: true, completo });
+}
+app.post('/api/pedidos/:id/recibido', need, part, wrap((req, res) => confirmar(req, res, true)));
+app.post('/api/pedidos/:id/entregado', need, part, wrap((req, res) => confirmar(req, res, false)));
+async function cancelarPedido(p, uid) {            // cancela antes de entregar: el dinero vuelve al comprador y el stock se repone
+  if (p.estado > 1 || p.comprador_confirmo || p.vendedor_confirmo) throw err(400, 'Este pedido ya no se puede cancelar');
   const cn = await pool.getConnection();
   try {
     await cn.beginTransaction();
     const [it] = await cn.query('SELECT producto_id, cantidad FROM pedido_items_ce WHERE pedido_id=?', [p.id]);
     for (const i of it) await cn.query('UPDATE productos_ce SET stock=stock+? WHERE id=?', [i.cantidad, i.producto_id]);
     await cn.query('UPDATE pedidos_ce SET estado=3, pago_estado=?, punto_propuesto=NULL, punto_propuesto_id=NULL WHERE id=?', [p.pago_estado === 'retenido' ? 'reembolsado' : 'cancelado', p.id]);
-    if (p.entrega_modo !== 'tienda' && p.usuario_id)
-      await cn.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [p.id, req.uid, '❌ Pedido cancelado' + (p.pago_estado === 'retenido' ? '. Los fondos se devuelven al comprador.' : '.')]);
+    if (p.entrega_modo !== 'tienda' && p.usuario_id && uid)
+      await cn.query('INSERT INTO mensajes_pedido_ce (pedido_id,usuario_id,texto) VALUES (?,?,?)', [p.id, uid, '❌ Pedido cancelado' + (p.pago_estado === 'retenido' ? '. Los fondos se devuelven al comprador.' : '.')]);
     await cn.commit();
   } catch (e) { await cn.rollback(); throw e; } finally { cn.release(); }
-  res.json({ ok: true });
+}
+app.post('/api/pedidos/:id/cancelar', need, part, wrap(async (req, res) => { await cancelarPedido(req.ped, req.uid); res.json({ ok: true }); }));
+
+// ---------- Seguimiento de pedidos de invitados (número de pedido + código) ----------
+const intentos = new Map();                         // límite sencillo contra adivinar códigos: 30 intentos por IP cada 15 min
+const limita = (req, res, next) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim(), t = Date.now(), r = intentos.get(ip);
+  if (!r || r.reset < t) intentos.set(ip, { n: 1, reset: t + 900000 });
+  else if (++r.n > 30) return res.status(429).json({ error: 'Demasiados intentos. Espera unos minutos e inténtalo de nuevo' });
+  next();
+};
+const pedidoInvitado = async body => {
+  const id = parseInt(String(body.pedido || '').replace(/\D/g, ''), 10), cod = String(body.codigo || '').trim().toUpperCase();
+  const [[p]] = id && cod ? await pool.query('SELECT * FROM pedidos_ce WHERE id=? AND codigo_seguimiento=? AND usuario_id IS NULL', [id, cod]) : [[]];
+  if (!p) throw err(404, 'No encontramos un pedido con ese número y código. Revísalos');
+  return p;
+};
+const verSeguimiento = async p => {
+  const [o] = await pool.query(`SELECT ${SEL_PED} ${JOIN_PED} WHERE pe.id=?`, [p.id]);
+  const [x] = await conItems(o, null, 'c');
+  return { ...x, n: p.id };
+};
+app.post('/api/seguimiento', limita, wrap(async (req, res) => { res.json(await verSeguimiento(await pedidoInvitado(req.body))); }));
+app.post('/api/seguimiento/pagar', limita, wrap(async (req, res) => {
+  const p = await pedidoInvitado(req.body);
+  if (p.pago_estado !== 'pendiente') throw err(400, 'Este pedido no tiene un pago pendiente');
+  if (p.pago_vence && new Date(p.pago_vence) < new Date()) throw err(410, 'La referencia de pago venció');
+  await pool.query("UPDATE pedidos_ce SET pago_estado='retenido' WHERE id=?", [p.id]);
+  res.json(await verSeguimiento(p));
 }));
+app.post('/api/seguimiento/recibido', limita, wrap(async (req, res) => {   // el invitado confirma con su código; cuenta como confirmación del comprador
+  const p = await pedidoInvitado(req.body), fake = { ped: p, soyComprador: true, uid: null };
+  let r; await confirmar(fake, { json: x => { r = x; } }, true);
+  res.json({ ...r, pedido: await verSeguimiento(p) });
+}));
+app.post('/api/seguimiento/cancelar', limita, wrap(async (req, res) => { const p = await pedidoInvitado(req.body); await cancelarPedido(p, null); res.json(await verSeguimiento(p)); }));
 
 // ---------- Contacto y newsletter ----------
 app.post('/api/contacto', wrap(async (req, res) => {
