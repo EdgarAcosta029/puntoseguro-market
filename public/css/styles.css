@@ -31,6 +31,8 @@ p{margin:.6em 0}
 #sg{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--sf);border:1px solid var(--ln);border-radius:var(--rc);display:flex;flex-direction:column;z-index:6;overflow:hidden;box-shadow:0 12px 32px rgba(20,30,34,.12)}
 #sg[hidden]{display:none}#sg a,#sg span{padding:9px 14px;text-decoration:none}#sg a:hover{background:var(--bg)}
 nav{display:flex;gap:22px;font-weight:500;margin-left:auto}nav a{text-decoration:none;color:var(--mut);transition:color .15s}nav a:hover{color:var(--ink)}
+.tm{display:inline-flex;align-items:center;gap:6px;font:inherit;font-weight:500;color:var(--mut);background:none;border:1px solid var(--ln);border-radius:999px;padding:4px 12px;cursor:pointer;transition:color .15s,border-color .15s}
+.tm:hover{color:var(--ink);border-color:var(--mut)}.tm:focus-visible{outline:2px solid var(--pri);outline-offset:2px}.tm svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 main{max-width:1120px;margin:0 auto;padding:32px 24px 24px}
 
 /* Formularios y botones */
